@@ -1,7 +1,9 @@
 name: ECR Image Vulnerability Scan and Update
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main  # Trigger when code is pushed to 'main' (or you can trigger it for any push to the ECR repository)
 
 jobs:
   scan_and_upgrade:
@@ -51,5 +53,38 @@ jobs:
 
       - name: Notify via SNS if High or Critical Vulnerabilities Exist
         if: env.high_or_critical == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          aws sns publish --topic-arn $SNS_TOPIC_ARN --message "High or critical vulnerabilities found. Please check S3 for the detailed report."
+          aws sns publish --topic-arn $SNS_TOPIC_ARN --message "High or critical vulnerabilities found in the Docker image. Please check S3 for the detailed report."
+
+      - name: Upgrade Vulnerable Packages and Rebuild Image
+        if: env.high_or_critical == 'true'
+        run: |
+          docker build --no-cache -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG . # Build updated image
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Run Updated Vulnerability Scan and Upload Report to S3
+        if: env.high_or_critical == 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          format: 'json'
+          output: updated_report.json
+
+      - name: Upload Updated Vulnerability Report to S3
+        if: env.high_or_critical == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp updated_report.json s3://$S3_BUCKET/reports/updated_scan_report_$(date +%F_%T).json
+
+      - name: Final Notification via SNS for Completed Workflow
+        if: env.high_or_critical == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws sns publish --topic-arn $SNS_TOPIC_ARN --message "Docker image vulnerabilities have been addressed and an updated image has been pushed to ECR. Check S3 for the updated scan report."
